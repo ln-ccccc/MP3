@@ -1,8 +1,0 @@
-_base_: ../levircd.yaml
-
-save_dir: ./exp/levircd/ablation/att_c/
-
-model: !Node
-    type: CustomTrainer
-    args:
-        att_types: c
