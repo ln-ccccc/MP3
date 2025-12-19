@@ -1,4 +1,5 @@
-<img width="3024" height="1880" alt="7994b8d9527097e0736c619f83cefdbf" src="https://github.com/user-attachments/assets/49f7035e-d117-40e0-8c4a-9f5f39745837" /># 矿预测模型终端
+# 矿预测模型终端
+<img width="3024" height="1880" alt="7994b8d9527097e0736c619f83cefdbf" src="https://github.com/user-attachments/assets/49f7035e-d117-40e0-8c4a-9f5f39745837" />
 
 一个深色科技风的矿预测模型终端界面，保留原有「地图 + 图层切换 + 矿山搜索/定位 + 点击矿山查看详情」的基础功能框架，并替换为现代化的数据可视化与控制面板。
 
