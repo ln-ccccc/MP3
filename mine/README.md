@@ -1,155 +1,98 @@
-# mine
+# 矿预测模型终端
 
-## 快速启动（前端、后端、MySQL）
+一个深色科技风的矿预测模型终端界面，保留原有「地图 + 图层切换 + 矿山搜索/定位 + 点击矿山查看详情」的基础功能框架，并替换为现代化的数据可视化与控制面板。
 
-### 环境准备
-- Node `^20.19.0` 或 `>=22.12.0`（已在 `package.json` 的 `engines` 指定）
-- MySQL 8（本地服务或 Docker 均可）
-- 推荐安装 Docker 以快速运行 MySQL（可选）
+## 界面设计稿（结构与规范）
 
-### 数据库配置
-在项目根目录创建/编辑 `.env`：
+### 信息架构
 
 ```
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的密码
-DB_NAME=mine_db
+┌──────────────────────────────────────────────────────────────────────┐
+│ 顶栏：标题 + 后端/数据/模型状态 + 时间                                  │
+├──────────────────────────────────────────────────────┬───────────────┤
+│                                                      │ 右侧：悬浮堆栈  │
+│                                                      │ (可拖拽排序)    │
+│ 主区：全屏地图 (基础/卫星/地形)                        │ ├─ 地图控制    │
+│                                                      │ ├─ 模型控制    │
+│                                                      │ ├─ 关键指标    │
+│                                                      │ ├─ 预测曲线    │
+│                                                      │ └─ 分布热力    │
+└──────────────────────────────────────────────────────┴───────────────┘
 ```
 
-如果尚未创建数据库，可在命令行初始化（示例，按需替换密码）：
+### 视觉规范
 
-```
-mysql -uroot -p你的密码 -e "CREATE DATABASE IF NOT EXISTS mine_db CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
-```
+- 主题：深色背景 + 科技蓝（`#3B82F6`）/矿橙（`#F59E0B`）为主色
+- 字体：系统无衬线（`Inter, -apple-system, Segoe UI, Roboto, ...`）
+- 材质：Glassmorphism (毛玻璃) 风格，背景模糊 `8px`
+- 动效：组件悬浮/拖拽反馈，平滑过渡
 
-也可以用 Docker 启动一个 MySQL 8（可选）：
+### 交互规范
 
-```
-docker run -d --name mysql8 \
-  -e MYSQL_ROOT_PASSWORD=你的密码 \
-  -e MYSQL_DATABASE=mine_db \
-  -p 3306:3306 mysql:8
-```
+- **组件拖拽**：右侧悬浮堆栈中的所有卡片支持**拖拽排序**，可根据使用习惯调整位置
+- 操作组件反馈：按钮 hover/active、表单 focus 高亮
+- 可视化缩放：曲线图与热力图均启用 `dataZoom`（滚轮/拖拽/滑条）
+- 详情查看：点击曲线点或热力栅格，弹出「点位/栅格详情」对话框
+- 防误操作：停止预测、重置参数均有确认弹窗
 
-### 安装依赖
+## 组件替换清单
 
-```
+| 原界面组件/元素 | 状态 | 新组件/区域 | 说明 |
+|---|---:|---|---|
+| 主标题「云南矿山生态修复智能监测平台」 | 替换 | 顶栏主标题「矿预测模型终端」 | 符合终端定位 |
+| 过时装饰性挂件（装饰图形/复杂玻璃挂件等） | 移除 | 极简卡片体系 | 通过负空间与材质实现高级感 |
+| 左侧悬浮统计卡/排名卡 | 替换 | 操作面板 + 指标卡片 + 状态监控 | 强化“预测模型终端”任务导向 |
+| 旧式详情弹窗 | 重做 | 现代化矿山详情弹窗（含 NDVI 图） | 信息更聚焦，风格统一 |
+| 缺少预测/分布可视化 | 新增 | 实时预测曲线图 | 支持缩放、点选详情、滚动更新 |
+| 缺少分布热力展示 | 新增 | 矿藏分布热力图 | 栅格密度热力，支持缩放与详情 |
+
+## 操作说明
+
+### 1) 启动与访问
+
+前端：
+
+```bash
 npm install
+npm run dev
 ```
 
-### 启动后端（Express + mysql2）
-- 后端入口：`server.js`，默认端口 `8000`
-- 读取 `.env` 连接 MySQL，启动时会：
-  - 创建表 `mines_geojson`（如不存在）
-  - 若表为空并存在 `dali.geojson`，自动导入为要素集合
+后端（Express + MySQL）：
 
-启动命令：
-
-```
+```bash
 node server.js
-# 输出示例：服务器运行在 http://localhost:8000
 ```
 
-### 启动前端（Vite + Vue 3）
+默认端口：
+- 前端：`http://localhost:5173/`
+- 后端：`http://localhost:8000/`
 
-```
-npm run dev
-# 本地开发地址：http://localhost:5173/
-```
+可选环境变量：
+- `VITE_API_BASE`：后端地址（默认 `http://localhost:8000`）
+- `VITE_GEOVIEW_URL`：顶栏「进入系统」跳转地址（默认 `http://localhost:3000/`）
 
-前端会从后端读取数据：
-- `GET http://localhost:8000/api/geojson` 返回矿山 GeoJSON 集合
-- `GET http://localhost:8000/api/mines/ndvi?fid={FID_1}` 返回该矿山历年 NDVI 统计
-- `GET http://localhost:8000/api/mines/search?q={FID_1 或 名称片段}` 按编号/名称搜索
+### 2) 地图操作
 
-### 可选：导入 NDVI 数据（Excel）
-项目根目录已有 `NDVI_2year.xlsx`，可按需导入到 MySQL：
+- 图层切换：地图上方「基础/卫星/地形/NDVI」
+- 定位矿山：输入「矿山ID 或 名称」并点击「定位」
+- 查看矿山详情：点击矿区多边形，弹出详情并渲染 NDVI 曲线
 
-```
-npm run import:ndvi  # 默认读取 NDVI_2year.xlsx
-# 或指定文件
-npm run import:ndvi -- your.xlsx
-```
+### 3) 预测操作
 
-脚本会自动：
-- 创建表 `ndvi_data(fid INT, year INT, ndvi_value DECIMAL(6,3), PRIMARY KEY(fid,year))`
-- 解析 Excel 并写入/更新 (fid,year) 的 NDVI 值
+- 模型选择：线性趋势 / 指数平滑 / 混合趋势
+- 参数调整：预测窗口、刷新频率、平滑系数、置信水平
+- 启动预测：开始定时刷新预测曲线
+- 暂停：停止刷新但保留当前状态
+- 停止：会弹出确认提示，停止后不再实时刷新
+- 重置参数：会弹出确认提示，恢复默认参数并刷新曲线
 
-> 提示：若需要指定 GeoJSON 文件，设置环境变量 `GEOJSON_PATH`（默认 `dali.geojson`）。
+### 4) 可视化交互
 
----
+- 缩放：曲线图/热力图支持滚轮缩放与滑条缩放
+- 详情：点击曲线点或热力栅格，弹出详情对话框
 
-## NDVI 数据导入（从 NDVI_2year.xlsx 到 MySQL）
+## 分辨率适配
 
-1. 配置数据库连接，在项目根目录 `.env` 中设置：
+- ≥ 980px：左侧控制栏 + 右侧主区（地图 + 双图）
+- < 980px：自动切换为单列布局，双图纵向排列，详情弹窗自动改为单列
 
-```
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的密码
-DB_NAME=mine_db
-```
-
-2. 将 `NDVI_2year.xlsx` 放在项目根目录（已存在）。支持两种表头结构：
-   - 宽表：`FID_1` 列 + 多个年份列（如 `2023`, `2024`）
-   - 纵表：`FID_1`, `year`, `ndvi`（或 `ndvi_value`）
-
-3. 执行导入：
-
-```
-npm run import:ndvi  # 默认读取 NDVI_2year.xlsx
-# 或指定文件
-npm run import:ndvi -- your.xlsx
-```
-
-脚本会自动：
-- 创建表 `ndvi_data(fid INT, year INT, ndvi_value DECIMAL(6,3), PRIMARY KEY(fid,year))`
-- 解析 Excel 并写入/更新 (fid,year) 的 NDVI 值
-
-4. 后端接口 `/api/mines/ndvi?fid=xxx` 会从 `ndvi_data` 读取该 FID 的所有年份 NDVI，后端以 JS 计算：
-- `ndvi_mean`：均值
-- `ndvi_trend`：线性回归斜率（year vs NDVI）
-- `mk_trend`：根据斜率阈值判定（上升/下降/无趋势）
-
-如需改为数据库视图/存储过程计算，可根据需要扩展。
-
-
-This template should help get you started developing with Vue 3 in Vite.
-
-## Recommended IDE Setup
-
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
-
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd) 
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
-npm install
-```
-
-### Compile and Hot-Reload for Development
-
-```sh
-npm run dev
-```
-
-### Compile and Minify for Production
-
-```sh
-npm run build
-```

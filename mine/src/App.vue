@@ -1,881 +1,665 @@
 <template>
-  <div class="dashboard">
-    <div class="header">
-      <div class="header-left">
-        <div class="weather">
-          <span class="weather-icon">{{ weatherIcon }}</span>
-          <span class="temperature">{{ temperature }}°C</span>
-          <span class="air-quality">空气{{ airQuality }}</span>
-        </div>
+  <div class="terminal-fullscreen">
+    <!-- Map Background -->
+    <div ref="mapEl" class="map-background" />
+
+    <!-- Top Bar Overlay -->
+    <header class="topbar-overlay">
+      <div class="brand">
+        <div class="brand-title">矿预测模型终端</div>
+        <div class="brand-subtitle">Mine Prediction Model Console</div>
       </div>
-      <div class="header-title">
-        <h1>云南矿山生态修复智能监测平台</h1>
-      </div>
-      <div class="header-right">
-        <div class="date-time">{{ currentDate }} {{ currentTime }}</div>
-        <div class="login-info">
-          <span class="icon">👤</span>
-          <span>管理员</span>
+      <div class="topbar-status">
+        <div class="status-item">
+          <span class="status-dot" :class="{ active: backend.connected }" />
+          <span>后端 {{ backend.connected ? 'ONLINE' : 'OFFLINE' }}</span>
         </div>
-        <button class="enter-system-btn" @click="goToGeoView">进入系统</button>
+        <div class="status-item">
+          <span class="status-dot" :class="{ active: model.state === 'running' }" />
+          <span>模型 {{ model.state.toUpperCase() }}</span>
+        </div>
+        <div class="datetime">{{ currentDate }} {{ currentTime }}</div>
+      </div>
+    </header>
+
+    <!-- Global Loading & Error -->
+    <div v-if="isLoading" class="loading-overlay">
+      <div class="spinner"></div>
+      <div class="loading-text">系统初始化中...</div>
+    </div>
+    <div v-if="globalError" class="error-toast">
+      <span class="error-icon">⚠️</span> {{ globalError }}
+      <button class="close-toast" @click="globalError = ''">×</button>
+    </div>
+
+    <!-- Right Floating Stack -->
+    <div class="floating-stack">
+      <div 
+        v-for="(itemId, index) in stackOrder" 
+        :key="itemId"
+        class="draggable-wrapper"
+        draggable="true"
+        @dragstart="onDragStart($event, index)"
+        @dragover.prevent
+        @dragenter.prevent
+        @drop="onDrop($event, index)"
+      >
+        <!-- Core 1: Layer & Search -->
+        <section v-if="itemId === 'mapCtrl'" class="glass-card">
+          <div class="card-header">
+            <div class="card-title">地图层级与定位</div>
+          </div>
+          <div class="card-body">
+            <div class="layer-switch">
+              <button 
+                v-for="l in ['base', 'satellite', 'terrain']" 
+                :key="l"
+                class="layer-btn"
+                :class="{ active: currentLayer === l }"
+                @click="switchLayer(l)"
+              >
+                {{ l === 'base' ? '基础' : (l === 'satellite' ? '卫星' : '地形') }}
+              </button>
+            </div>
+            <div class="search-box">
+              <input 
+                v-model="searchMineId" 
+                type="text" 
+                placeholder="输入矿山ID/名称..." 
+                @keydown.enter="searchMineById"
+              />
+              <button class="icon-btn" @click="searchMineById">🔍</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Core 2: Operation Panel -->
+        <section v-if="itemId === 'modelCtrl'" class="glass-card">
+          <div class="card-header">
+            <div class="card-title">模型控制</div>
+            <div class="status-badge" :class="model.state">{{ model.state }}</div>
+          </div>
+          <div class="card-body compact-form">
+            <div class="form-row">
+              <label>模型</label>
+              <select v-model="model.modelKey">
+                <option value="linear">线性趋势</option>
+                <option value="ema">指数平滑</option>
+                <option value="hybrid">混合趋势</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <label>窗口</label>
+              <input type="range" v-model.number="model.horizonYears" min="2" max="12" />
+              <span class="val">{{ model.horizonYears }}</span>
+            </div>
+            <div class="form-row">
+              <label>频率</label>
+              <input type="range" v-model.number="model.updateEverySec" min="1" max="6" />
+              <span class="val">{{ model.updateEverySec }}s</span>
+            </div>
+            <div class="action-grid">
+              <button class="btn primary" :disabled="model.state === 'running'" @click="startModel">启动</button>
+              <button class="btn warning" :disabled="model.state !== 'running'" @click="pauseModel">暂停</button>
+              <button class="btn danger" :disabled="model.state === 'idle'" @click="confirmStopModel">停止</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Core 3: Key Metrics -->
+        <section v-if="itemId === 'metrics'" class="glass-card">
+          <div class="card-header">
+            <div class="card-title">关键指标 · {{ selectedMineLabel }}</div>
+          </div>
+          <div class="card-body metrics-grid">
+            <div class="metric-item">
+              <div class="m-label">预测指数</div>
+              <div class="m-val blue">{{ metrics.endIndex }}</div>
+            </div>
+            <div class="metric-item">
+              <div class="m-label">潜力评分</div>
+              <div class="m-val orange">{{ metrics.potentialScore }}</div>
+            </div>
+            <div class="metric-item">
+              <div class="m-label">异常风险</div>
+              <div class="m-val">{{ metrics.riskLevel }}</div>
+            </div>
+            <div class="metric-item">
+              <div class="m-label">NDVI趋势</div>
+              <div class="m-val" :class="selectedMine.ndvi_trend > 0 ? 'good' : 'bad'">
+                {{ (selectedMine.ndvi_trend * 100).toFixed(2) }}%
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Core 4: Prediction Chart -->
+        <section v-if="itemId === 'chartPred'" class="glass-card">
+          <div class="card-header">
+            <div class="card-title">实时预测曲线</div>
+          </div>
+          <div class="card-body">
+            <div v-show="selectedMine.mine_id" ref="predictionChartEl" class="chart-box" />
+            <div v-if="!selectedMine.mine_id" class="empty-state">
+              <span>请选择矿山查看预测</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Core 5: Heatmap -->
+        <section v-if="itemId === 'chartHeat'" class="glass-card">
+          <div class="card-header">
+            <div class="card-title">矿藏分布热力</div>
+          </div>
+          <div class="card-body">
+            <div v-show="selectedMine.mine_id" ref="heatmapChartEl" class="chart-box" />
+            <div v-if="!selectedMine.mine_id" class="empty-state">
+              <span>暂无分布数据</span>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
 
-    <div class="main-content">
-      <!-- 左侧面板移除，改为悬浮卡片 -->
-      <div class="mine-type-card glass-card floating-card">
-        <div class="panel-title fancy-title">矿山类型统计</div>
-        <div class="chart-inner">
-          <div class="pie-segments">
-            <div class="segment segment-1"></div>
-            <div class="segment segment-2"></div>
-            <div class="segment segment-3"></div>
-            <div class="segment segment-4"></div>
-            <div class="segment segment-5"></div>
+    <!-- Dialogs -->
+    <Transition name="fade">
+      <div v-if="confirm.open" class="modal-backdrop" @click="confirm.open = false">
+        <div class="glass-card modal-card" @click.stop>
+          <div class="card-header">
+            <div class="card-title">{{ confirm.title }}</div>
           </div>
-          <div class="pie-center">
-            <div class="pie-value gradient-number">{{ mineTotal }}</div>
-            <div class="pie-label subtle-label">矿山</div>
-          </div>
-        </div>
-        <div class="stats-container">
-          <div class="stat-item">
-            <div class="stat-value gradient-number">{{ monitorCount }}</div>
-            <div class="stat-label subtle-label">监测点数</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-value gradient-number">{{ interventionCount }}</div>
-            <div class="stat-label subtle-label">人工干预</div>
+          <div class="card-body">
+            <p>{{ confirm.message }}</p>
+            <div class="modal-actions">
+              <button class="btn ghost" @click="confirm.open = false">{{ confirm.cancelText }}</button>
+              <button class="btn danger" @click="runConfirm">{{ confirm.confirmText }}</button>
+            </div>
           </div>
         </div>
       </div>
-      
-      <div class="ranking-card glass-card floating-card">
-        <div class="panel-title fancy-title">矿区干预等级排名</div>
-        <div class="ranking-list">
-          <div class="ranking-item" v-for="(item, index) in rankingList" :key="index">
-            <div class="rank rank-pill">TOP{{ index + 1 }}</div>
-            <div class="rank-name">{{ item.name }}</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 中间地图区域 -->
-      <div class="center-panel">
-        <div class="map-controls">
-          <div class="layer-switch">
-            <div class="layer-btn" :class="{ active: currentLayer === 'base' }" @click="switchLayer('base')">基础图层</div>
-            <div class="layer-btn" :class="{ active: currentLayer === 'satellite' }" @click="switchLayer('satellite')">卫星图层</div>
-            <div class="layer-btn" :class="{ active: currentLayer === 'terrain' }" @click="switchLayer('terrain')">地形图层</div>
-            <div class="layer-btn" :class="{ active: currentLayer === 'ndvi' }" @click="switchLayer('ndvi')">NDVI图层</div>
-          </div>
-          <!-- 添加FID搜索功能 -->
-          <div class="search-container">
-            <input type="text" v-model="searchMineId" placeholder="输入矿山ID" class="search-input" />
-            <button @click="searchMineById" class="search-btn">搜索</button>
-          </div>
-        </div>
-        <div id="map"></div>
-        
-        <!-- 直接悬浮在地图上的卡片 -->
-        <div class="data-overview glass-card floating-card">
-          <div class="panel-title fancy-title">数据概览</div>
-          <div class="overview-item">
-            <div class="overview-value gradient-number">{{ overviewArea }}</div>
-            <div class="overview-label subtle-label">监测面积(㎡)</div>
-          </div>
-          <div class="overview-item">
-            <div class="overview-value gradient-number">{{ overviewSoilCover }}</div>
-            <div class="overview-label subtle-label">土壤覆盖</div>
-          </div>
-          <div class="overview-item">
-            <div class="overview-value gradient-number">{{ overviewVegCover }}</div>
-            <div class="overview-label subtle-label">植被覆盖率(%)</div>
-          </div>
-        </div>
+    </Transition>
     
-        <div class="env-indicators glass-card floating-card">
-          <div class="panel-title fancy-title">环境指标</div>
-          <div class="indicator-item">
-            <div class="indicator-label subtle-label">空气湿度(%)</div>
-            <div class="indicator-bar">
-              <div class="bar-fill" :style="{ width: humidity + '%' }"></div>
-              <div class="bar-value gradient-number">{{ humidity }}%</div>
+    <Transition name="fade">
+        <div v-if="mineDetail.open" class="modal-backdrop" @click="mineDetail.open = false">
+            <div class="glass-card modal-card wide" @click.stop>
+                <div class="card-header">
+                    <div class="card-title">矿山详情 · {{ selectedMineLabel }}</div>
+                    <button class="close-btn" @click="mineDetail.open = false">✕</button>
+                </div>
+                <div class="card-body split-body">
+                    <div class="detail-list">
+                        <div class="kv-row"><span>ID</span><span class="mono">{{ selectedMine.mine_id }}</span></div>
+                        <div class="kv-row"><span>面积</span><span class="mono">{{ selectedMine.area }}</span></div>
+                        <div class="kv-row"><span>坐标</span><span class="mono">{{ mineCenterText }}</span></div>
+                        <div class="kv-row"><span>NDVI</span><span class="mono">{{ formatFixed(selectedMine.ndvi_mean, 3) }}</span></div>
+                    </div>
+                    <div class="detail-chart">
+                        <div ref="ndviChartEl" class="chart-box-sm"></div>
+                    </div>
+                </div>
             </div>
-          </div>
-          <div class="indicator-item">
-            <div class="indicator-label subtle-label">空气温度(℃)</div>
-            <div class="indicator-bar">
-              <div class="bar-fill" :style="{ width: Math.min(100, Math.max(0, temperature)) + '%' }"></div>
-              <div class="bar-value gradient-number">{{ temperature }}℃</div>
-            </div>
-          </div>
         </div>
-      </div>
-
-      <!-- 矿山详情弹窗 - 居中显示 -->
-      <div v-if="showMineDetail" class="mine-detail-popup centered-popup">
-        <div class="popup-header">
-          <div class="popup-title">矿山详情 - {{ selectedMine.name || ('矿山 ' + selectedMine.mine_id) }}</div>
-          <div class="popup-close" @click="showMineDetail = false">✕</div>
-        </div>
-        <div class="popup-content">
-          <div class="detail-item">
-            <div class="detail-label">矿山ID</div>
-            <div class="detail-value">{{ selectedMine.mine_id }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">监测面积(㎡)</div>
-            <div class="detail-value">{{ selectedMine.area ?? '暂无' }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">位置坐标</div>
-            <div class="detail-value">{{ (selectedMine.center_lat ?? 0).toFixed(6) }}, {{ (selectedMine.center_lng ?? 0).toFixed(6) }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">边界范围</div>
-            <div class="detail-value">{{ selectedMine.bbox ?? '—' }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">NDVI均值</div>
-            <div class="detail-value">{{ (selectedMine.ndvi_mean ?? 0).toFixed(3) }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">NDVI趋势</div>
-            <div class="detail-value" :class="getTrendClass(selectedMine.ndvi_trend)">{{ formatTrend(selectedMine.ndvi_trend) }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">MK趋势</div>
-            <div class="detail-value" :class="getMkTrendClass(selectedMine.mk_trend)">{{ selectedMine.mk_trend }}</div>
-          </div>
-          <div class="detail-item">
-            <div class="detail-label">Sen's Slope</div>
-            <div class="detail-value">{{ formatSensSlope(selectedMine.sens_slope) }}</div>
-          </div>
-          <div class="trend-chart">
-            <div ref="ndviChart" class="chart-placeholder"></div>
-          </div>
-        </div>
-      </div>
-    </div>
+    </Transition>
   </div>
 </template>
 
-<script>
-import { onMounted, ref, nextTick } from 'vue';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
-import * as echarts from 'echarts';
-import axios from 'axios';
+<script setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import * as echarts from 'echarts'
+import axios from 'axios'
 
-export default {
-  name: 'App',
-  setup() {
-    // 响应式状态
-    const currentLayer = ref('base');
-    const showMineDetail = ref(false);
-    const selectedMine = ref({});
-    const currentDate = ref('');
-    const currentTime = ref('');
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
-    // 天气与环境（温度/湿度/空气质量动态）
-    const temperature = ref(25);
-    const weatherIcon = ref('🌤️');
-    const airQuality = ref('优');
-    const humidity = ref(69);
+const currentDate = ref('')
+const currentTime = ref('')
+const currentLayer = ref('base')
+const searchMineId = ref('')
+const isLoading = ref(true)
+const globalError = ref('')
 
-    // 其他环境指标（本地模拟）
-    const soilMoisture = ref(12);
-    const rainfall = ref(23);
-    const airTemp = ref(45);
+const mapEl = ref(null)
+let map = null
+let mineLayer = null
+let baseMaps = {}
 
-    // 概览与人员数字动画用的响应式值
-    const overviewArea = ref(0);
-    const overviewSoilCover = ref(0);
-    const overviewVegCover = ref(0);
-    const donutTotal = ref(0);
+const backend = reactive({ connected: false, latencyMs: null, lastCheckedAt: 0 })
+const model = reactive({ state: 'idle', modelKey: 'linear', horizonYears: 6, updateEverySec: 2, alpha: 0.35, confidence: 0.86, lastUpdatedAt: 0 })
+const selectedMine = reactive({ mine_id: null, name: null, area: null, center_lat: null, center_lng: null, ndvi_mean: null, ndvi_trend: 0, mk_trend: null, ndvi_data: [] })
+const selectedMineLabel = computed(() => selectedMine.name || (selectedMine.mine_id != null ? `矿山 ${selectedMine.mine_id}` : '未选择'))
+const mineCenterText = computed(() => (selectedMine.center_lat && selectedMine.center_lng) ? `${Number(selectedMine.center_lat).toFixed(4)}, ${Number(selectedMine.center_lng).toFixed(4)}` : '—')
+const mineDetail = reactive({ open: false })
+const confirm = reactive({ open: false, title: '', message: '', confirmText: '确认', cancelText: '取消', onConfirm: null })
+const metrics = reactive({ endIndex: '—', potentialScore: '—', riskLevel: '—', dataFreshness: '—' })
 
-    const searchMineId = ref('');
-    const ndviChart = ref(null);
-    let map = null;
-    let baseMaps = {};
-    let mineLayer = null;
-    let minesData = [];
+const stackOrder = ref(['mapCtrl', 'modelCtrl', 'metrics', 'chartPred', 'chartHeat'])
+let draggedIndex = -1
 
-    // 排名列表数据
-    const rankingList = ref([
-      { name: '水平沟' },
-      { name: '林区' },
-      { name: '东盟区' },
-      { name: '工业区' },
-      { name: '西山区' }
-    ]);
+const ndviChartEl = ref(null)
+const predictionChartEl = ref(null)
+const heatmapChartEl = ref(null)
+let ndviChart = null
+let predictionChart = null
+let heatmapChart = null
+let modelTimer = null
 
-    // 人员数据
-    const personnelData = ref([
-      { type: '管理员', count: 145, percent: 16, color: '#4ecdc4' },
-      { type: '专家组', count: 157, percent: 11, color: '#ff6b6b' },
-      { type: '监测员', count: 119, percent: 9, color: '#ffe66d' },
-      { type: '作业组', count: 295, percent: 7, color: '#1a535c' },
-      { type: '管理组', count: 647, percent: 2, color: '#4281a4' }
-    ]);
+// Helper functions
+const formatFixed = (v, d) => Number(v) ? Number(v).toFixed(d) : '—'
+const updateDateTime = () => {
+    const now = new Date()
+    currentDate.value = now.toLocaleDateString('zh-CN')
+    currentTime.value = now.toLocaleTimeString('zh-CN')
+}
 
-    // 动画辅助
-    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-    const animateNumber = (targetRef, targetValue, duration = 800) => {
-      const start = Number(targetRef.value) || 0;
-      const end = Number(targetValue) || 0;
-      const startTime = performance.now();
-      const step = (now) => {
-        const t = Math.min(1, (now - startTime) / duration);
-        const val = Math.round(start + (end - start) * easeOutCubic(t));
-        targetRef.value = val;
-        if (t < 1) requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    };
+// Map Logic
+const initMap = async () => {
+  if (map) return
+  map = L.map(mapEl.value, {
+    zoomControl: false,
+    attributionControl: false
+  }).setView([24.48, 103.09], 12)
 
-    // 格式化日期时间
-    const updateDateTime = () => {
-      const now = new Date();
-      currentDate.value = now.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
-      currentTime.value = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    };
-
-    // 本地模拟环境数据（不覆盖温度/湿度）
-    const updateSimEnvironment = () => {
-      const icons = ['🌤️', '⛅', '🌥️', '☀️', '🌦️'];
-      weatherIcon.value = icons[Math.floor(Math.random() * icons.length)];
-      soilMoisture.value = Math.floor(Math.random() * 20 + 5); // 5-25%
-      rainfall.value = Math.floor(Math.random() * 40 + 10); // 10-50mm
-      airTemp.value = Math.floor(Math.random() * 15 + 35); // 35-50℃
-    };
-
-    // 环境数据映射
-    const formatAqiToText = (aqi) => {
-      if (aqi == null) return '暂无';
-      if (aqi <= 50) return '优';
-      if (aqi <= 100) return '良';
-      if (aqi <= 150) return '轻度污染';
-      if (aqi <= 200) return '中度污染';
-      if (aqi <= 300) return '重度污染';
-      return '严重污染';
-    };
-
-    // 实时环境数据（根据坐标）
-    let envFetchTimer = null;
-
-    const fetchRealtimeEnvironmentAt = async (lat, lon) => {
-      try {
-        const weatherUrl = 'https://api.open-meteo.com/v1/forecast';
-        const airUrl = 'https://air-quality-api.open-meteo.com/v1/air-quality';
-        const w = await axios.get(weatherUrl, {
-          params: {
-            latitude: lat,
-            longitude: lon,
-            current: 'temperature_2m,relative_humidity_2m',
-            timezone: 'Asia/Shanghai'
-          }
-        });
-        const curr = w?.data?.current || {};
-        if (curr.temperature_2m != null) animateNumber(temperature, Math.round(curr.temperature_2m));
-        if (curr.relative_humidity_2m != null) animateNumber(humidity, Math.round(curr.relative_humidity_2m));
-
-        const aq = await axios.get(airUrl, {
-          params: {
-            latitude: lat,
-            longitude: lon,
-            hourly: 'us_aqi,pm2_5,pm10',
-            timezone: 'Asia/Shanghai'
-          }
-        });
-        const h = aq?.data?.hourly;
-        let aqi = null;
-        if (h?.us_aqi?.length) aqi = h.us_aqi[h.us_aqi.length - 1];
-        airQuality.value = formatAqiToText(aqi);
-      } catch (e) {
-        console.warn('实时环境数据拉取失败:', e.message);
-      }
-    };
-
-    const registerMapListeners = () => {
-      if (!map) return;
-      map.on('moveend', () => {
-        const c = map.getCenter();
-        if (envFetchTimer) clearTimeout(envFetchTimer);
-        envFetchTimer = setTimeout(() => {
-          fetchRealtimeEnvironmentAt(c.lat, c.lng);
-        }, 350);
-      });
-      const c = map.getCenter();
-      fetchRealtimeEnvironmentAt(c.lat, c.lng);
-    };
-
-    // 格式化趋势
-    const formatTrend = (trend) => {
-      if (!trend) return '无变化';
-      return trend > 0 ? `上升 ${trend.toFixed(2)}` : `下降 ${Math.abs(trend).toFixed(2)}`;
-    };
-
-    // 获取趋势样式类
-    const getTrendClass = (trend) => {
-      if (!trend) return '';
-      return trend > 0 ? 'trend-up' : 'trend-down';
-    };
-
-    // 获取MK趋势样式类
-    const getMkTrendClass = (trend) => {
-      if (!trend) return '';
-      if (trend && trend.includes('上升')) return 'trend-up';
-      if (trend && trend.includes('下降')) return 'trend-down';
-      return '';
-    };
-
-    // 格式化Sen's Slope值
-    const formatSensSlope = (slope) => {
-      if (!slope && slope !== 0) return '暂无数据';
-      return (Number(slope) || 0).toFixed(4) + ' / 年';
-    };
-
-    // 切换图层
-    const switchLayer = (layer) => {
-      currentLayer.value = layer;
-      updateMapLayer();
-    };
-
-    // 更新地图图层
-    const updateMapLayer = () => {
-      if (!map) return;
-      Object.values(baseMaps).forEach(layer => {
-        if (map.hasLayer(layer)) {
-          map.removeLayer(layer);
-        }
-      });
-      if (baseMaps[currentLayer.value]) {
-        baseMaps[currentLayer.value].addTo(map);
-      }
-      if (mineLayer && !map.hasLayer(mineLayer)) {
-        mineLayer.addTo(map);
-      }
-    };
-
-    // 搜索矿山（支持按FID_1或名称）
-    const searchMineById = async () => {
-      if (!searchMineId.value) return;
-      try {
-        const { data: feature } = await axios.get(`http://localhost:8000/api/mines/search?q=${encodeURIComponent(searchMineId.value)}`);
-        const bounds = L.geoJSON(feature).getBounds();
-        map.fitBounds(bounds, { padding: [50, 50] });
-
-        mineLayer.resetStyle();
-        const targetFid = feature.properties.FID_1;
-        mineLayer.eachLayer(layer => {
-          if (layer.feature && layer.feature.properties.FID_1 === targetFid) {
-            layer.setStyle({ color: '#00d2d3', weight: 3, opacity: 1, fillColor: '#00d2d3', fillOpacity: 0.35 });
-          }
-        });
-
-        // 定位后按中心刷新环境数据
-        const c = map.getCenter();
-        fetchRealtimeEnvironmentAt(c.lat, c.lng);
-
-        // 拉取NDVI
-        let ndviResp = null;
-        try { ndviResp = await axios.get(`http://localhost:8000/api/mines/ndvi?fid=${targetFid}`); } catch {}
-        const ndvi = ndviResp?.data || {};
-
-        selectedMine.value = {
-          mine_id: targetFid,
-          name: feature.properties.mine_name || feature.properties.name || `矿山 ${targetFid}`,
-          area: feature.properties.area,
-          ndvi_mean: ndvi.ndvi_mean ?? 0.45,
-          ndvi_trend: ndvi.ndvi_trend ?? 0.02,
-          mk_trend: ndvi.mk_trend ?? '无趋势',
-          sens_slope: ndvi.ndvi_trend ? ndvi.ndvi_trend / 10 : 0.002,
-          ndvi_data: ndvi.ndvi_data?.length ? ndvi.ndvi_data : generateMockNdviData()
-        };
-
-        showMineDetail.value = true;
-        nextTick(() => { renderNdviChart(); });
-      } catch (err) {
-        console.error('搜索矿山失败:', err);
-        alert('未找到该矿山或后端接口异常');
-      }
-    };
-
-    // 生成模拟NDVI数据
-    const generateMockNdviData = (baseValue = 0.4, trend = 0.01) => {
-      const data = [];
-      const startYear = 2014;
-      const endYear = 2024;
-      let value = baseValue - (trend * 4);
-      for (let year = startYear; year <= endYear; year += 2) {
-        value += trend + (Math.random() * 0.06 - 0.02);
-        value = Math.max(0.1, Math.min(0.9, value));
-        data.push({ year, ndvi_value: value });
-      }
-      return data;
-    };
-
-    // 渲染NDVI趋势图表
-    const renderNdviChart = () => {
-      if (!selectedMine.value.ndvi_data || selectedMine.value.ndvi_data.length === 0) return;
-      const chartDom = ndviChart.value;
-      if (!chartDom) return;
-      const myChart = echarts.init(chartDom);
-      const raw = selectedMine.value.ndvi_data.map(d => ({ year: Number(d.year), ndvi_value: Number(d.ndvi_value) })).sort((a,b)=>a.year-b.year);
-      const yearsAll = raw.map(d=>d.year);
-      const diffs = [];
-      for(let i=1;i<yearsAll.length;i++){ diffs.push(Math.abs(yearsAll[i]-yearsAll[i-1])); }
-      const gcd = (a,b)=> b ? gcd(b,a%b) : a;
-      let step = diffs.length ? diffs.reduce((acc,v)=>gcd(acc,v)) : 2;
-      if (!step || step < 2) step = 2;
-      const baseYear = yearsAll[0];
-      const filtered = raw.filter(d => ((d.year - baseYear) % step) === 0);
-      const years = filtered.map(d=>d.year);
-      const values = filtered.map(d=>d.ndvi_value);
-
-      let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-      const n = years.length;
-      const xData = years.map((_, i) => i);
-      for (let i = 0; i < n; i++) { sumX += xData[i]; sumY += values[i]; sumXY += xData[i] * values[i]; sumX2 += xData[i] * xData[i]; }
-      const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
-      const intercept = (sumY - slope * sumX) / n;
-      const trendData = xData.map(x => intercept + slope * x);
-
-      const option = {
-        backgroundColor: 'rgba(0,0,0,0)',
-        grid: { left: '5%', right: '5%', top: '10%', bottom: '15%', containLabel: true },
-        legend: { data: ['NDVI值', '趋势线'], textStyle: { color: '#bbb' }, right: 10, top: 0 },
-        xAxis: { type: 'category', data: years, axisLine: { lineStyle: { color: '#666' } }, axisLabel: { color: '#bbb', fontSize: 10 } },
-        yAxis: {
-          type: 'value', name: 'NDVI', nameTextStyle: { color: '#bbb' },
-          min: Math.max(0, Math.min(...values) - 0.1), max: Math.min(1, Math.max(...values) + 0.1),
-          axisLine: { lineStyle: { color: '#666' } }, axisLabel: { color: '#bbb', fontSize: 10 },
-          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } }
-        },
-        series: [
-          { name: 'NDVI值', data: values, type: 'line', smooth: true, symbol: 'circle', symbolSize: 6,
-            itemStyle: { color: '#4ecdc4' }, lineStyle: { width: 3, color: '#4ecdc4' },
-            areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [ { offset: 0, color: 'rgba(78, 205, 196, 0.5)' }, { offset: 1, color: 'rgba(78, 205, 196, 0.1)' } ]) }
-          },
-          { name: '趋势线', type: 'line', data: trendData, smooth: false, symbol: 'none',
-            lineStyle: { width: 2, type: 'dashed', color: selectedMine.value.ndvi_trend > 0 ? '#4ecdc4' : '#ff6b6b' }
-          }
-        ],
-        tooltip: {
-          trigger: 'axis',
-          formatter: function(params) {
-            const ndviData = params[0];
-            const trendData = params[1];
-            return `${ndviData.name}年<br/>NDVI: ${Number(ndviData.value).toFixed(3)}<br/>趋势值: ${Number(trendData.value).toFixed(3)}`;
-          },
-          backgroundColor: 'rgba(0,21,41,0.9)', borderColor: '#1e3a5f', textStyle: { color: '#fff' }
-        }
-      };
-      myChart.setOption(option);
-      window.addEventListener('resize', () => { myChart.resize(); });
-    };
-
-    // 初始化地图
-    const initMap = () => {
-      map = L.map('map', { zoomControl: false, attributionControl: false }).setView([25.6, 100.2], 9);
-      L.control.zoom({ position: 'bottomright' }).addTo(map);
-      baseMaps = {
-        base: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }),
-        satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }),
-        terrain: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', { maxZoom: 17 }),
-        ndvi: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, opacity: 0.7 })
-      };
-      baseMaps[currentLayer.value].addTo(map);
-      loadMinesData();
-      // 绑定地图中心事件并初次获取环境数据
-      registerMapListeners();
-    };
-
-    // 地图移动事件监听（旧版本，已不再使用）
-    const registerMapListenersOld = () => {
-      if (!map) return;
-      map.on('moveend', () => {
-        const c = map.getCenter();
-        fetchRealtimeEnvironmentAt(c.lat, c.lng);
-      });
-      const c = map.getCenter();
-      fetchRealtimeEnvironmentAt(c.lat, c.lng);
-    };
-
-    // 加载矿山数据（后端读取）
-    const loadMinesData = async () => {
-      try {
-        const { data } = await axios.get('http://localhost:8000/api/geojson');
-        if (!data || !data.features) throw new Error('后端未返回有效GeoJSON');
-        const geojsonData = data;
-        minesData = geojsonData.features;
-        mineLayer = L.geoJSON(geojsonData, {
-          style: { color: '#4ecdc4', weight: 2, opacity: 0.9, fillColor: '#4ecdc4', fillOpacity: 0.15 },
-          onEachFeature: (feature, layer) => {
-            layer.on('mouseover', (e) => { e.target.setStyle({ weight: 3, color: '#81ecec', fillOpacity: 0.25 }); e.target.bringToFront(); });
-            layer.on('mouseout', (e) => { mineLayer.resetStyle(e.target); });
-            layer.on('click', async () => {
-              const fid = feature.properties.FID_1;
-              const mineName = feature.properties.mine_name || feature.properties.name || `矿山 ${fid}`;
-              const mineArea = feature.properties.area;
-              mineLayer.resetStyle();
-              layer.setStyle({ color: '#00d2d3', weight: 3, opacity: 1, fillColor: '#00d2d3', fillOpacity: 0.35 });
-              const bounds = layer.getBounds();
-              map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
-              const center = bounds.getCenter();
-              fetchRealtimeEnvironmentAt(center.lat, center.lng);
-              try {
-                const res = await axios.get(`http://localhost:8000/api/mines/ndvi?fid=${fid}`);
-                const ndvi = res.data;
-                selectedMine.value = {
-                  mine_id: fid,
-                  name: mineName,
-                  area: mineArea,
-                  center_lat: center.lat,
-                  center_lng: center.lng,
-                  bbox: bounds.toBBoxString && bounds.toBBoxString(),
-                  ndvi_mean: ndvi.ndvi_mean,
-                  ndvi_trend: ndvi.ndvi_trend,
-                  mk_trend: ndvi.mk_trend,
-                  sens_slope: ndvi.ndvi_trend ? ndvi.ndvi_trend / 10 : null,
-                  ndvi_data: ndvi.ndvi_data?.length ? ndvi.ndvi_data : generateMockNdviData()
-                };
-              } catch (err) {
-                console.warn('NDVI接口异常，使用模拟数据:', err.message);
-                selectedMine.value = {
-                  mine_id: fid,
-                  name: mineName,
-                  area: mineArea,
-                  center_lat: center.lat,
-                  center_lng: center.lng,
-                  bbox: bounds.toBBoxString && bounds.toBBoxString(),
-                  ndvi_mean: 0.45,
-                  ndvi_trend: 0.02,
-                  mk_trend: '无趋势',
-                  sens_slope: 0.002,
-                  ndvi_data: generateMockNdviData()
-                };
-              }
-              showMineDetail.value = true;
-              nextTick(() => { renderNdviChart(); });
-            });
-          }
-        }).addTo(map);
-        if (mineLayer.getBounds().isValid()) {
-          map.fitBounds(mineLayer.getBounds(), { padding: [50, 50], maxZoom: 12 });
-        }
-      } catch (error) {
-        console.error('加载矿山数据失败:', error);
-        const geojsonData = {
-          type: 'FeatureCollection',
-          features: [
-            { type: 'Feature', properties: { FID_1: 1, mine_name: '示例矿山1', area: 12000 }, geometry: { type: 'Polygon', coordinates: [[[100.10,25.50],[100.20,25.50],[100.20,25.60],[100.10,25.60],[100.10,25.50]]] } },
-            { type: 'Feature', properties: { FID_1: 2, mine_name: '示例矿山2', area: 9000 }, geometry: { type: 'Polygon', coordinates: [[[100.30,25.70],[100.40,25.70],[100.40,25.80],[100.30,25.80],[100.30,25.70]]] } },
-            { type: 'Feature', properties: { FID_1: 3, mine_name: '示例矿山3', area: 15000 }, geometry: { type: 'Polygon', coordinates: [[[100.50,25.40],[100.60,25.40],[100.60,25.50],[100.50,25.50],[100.50,25.40]]] } },
-            { type: 'Feature', properties: { FID_1: 4, mine_name: '示例矿山4', area: 21000 }, geometry: { type: 'Polygon', coordinates: [[[100.20,25.30],[100.30,25.30],[100.30,25.40],[100.20,25.40],[100.20,25.30]]] } },
-            { type: 'Feature', properties: { FID_1: 5, mine_name: '示例矿山5', area: 18000 }, geometry: { type: 'Polygon', coordinates: [[[100.40,25.20],[100.50,25.20],[100.50,25.30],[100.40,25.30],[100.40,25.20]]] } }
-          ]
-        };
-        minesData = geojsonData.features;
-        mineLayer = L.geoJSON(geojsonData, {
-          style: { color: '#4ecdc4', weight: 2, opacity: 0.9, fillColor: '#4ecdc4', fillOpacity: 0.15 },
-          onEachFeature: (feature, layer) => {
-            layer.on('mouseover', (e) => { e.target.setStyle({ weight: 3, color: '#81ecec', fillOpacity: 0.25 }); e.target.bringToFront(); });
-            layer.on('mouseout', (e) => { mineLayer.resetStyle(e.target); });
-            layer.on('click', async () => {
-              const fid = feature.properties.FID_1;
-              const mineName = feature.properties.mine_name;
-              mineLayer.resetStyle();
-              layer.setStyle({ color: '#00d2d3', weight: 3, opacity: 1, fillColor: '#00d2d3', fillOpacity: 0.35 });
-              map.fitBounds(layer.getBounds(), { padding: [50, 50] });
-              const center = layer.getBounds().getCenter();
-              fetchRealtimeEnvironmentAt(center.lat, center.lng);
-              selectedMine.value = {
-                mine_id: fid,
-                name: mineName,
-                area: feature.properties.area,
-                center_lat: center.lat,
-                center_lng: center.lng,
-                bbox: bounds.toBBoxString && bounds.toBBoxString(),
-                ndvi_mean: 0.45,
-                ndvi_trend: 0.02,
-                mk_trend: '无趋势',
-                sens_slope: 0.002,
-                ndvi_data: generateMockNdviData()
-              };
-              showMineDetail.value = true;
-              nextTick(() => { renderNdviChart(); });
-            });
-          }
-        }).addTo(map);
-        if (mineLayer.getBounds().isValid()) {
-          map.fitBounds(mineLayer.getBounds(), { padding: [50, 50], maxZoom: 12 });
-        }
-      }
-    };
-
-    const mineTotal = ref(3821);
-    const monitorCount = ref(1237);
-    const interventionCount = ref(2584);
-    const startMineStatsTicker = () => {
-      const targets = [
-        { ref: mineTotal, value: 3821 },
-        { ref: monitorCount, value: 1237 },
-        { ref: interventionCount, value: 2584 },
-      ];
-      let idx = 0;
-      setInterval(() => {
-        const t = targets[idx];
-        t.ref.value = 0;
-        animateNumber(t.ref, t.value, 900);
-        idx = (idx + 1) % targets.length;
-      }, 3500);
-    };
-
-    const goToGeoView = () => {
-      let base = import.meta.env.VITE_GEOVIEW_URL || 'http://localhost:3000/'
-      const hasHash = /#\//.test(base)
-      const target = hasHash ? base : (base.endsWith('/') ? base + '#/detectchanges' : base + '/#/detectchanges')
-      window.location.href = target
-    }
-
-    onMounted(() => {
-      // 初始化日期时间
-      updateDateTime();
-      setInterval(updateDateTime, 1000);
-      // 本地环境模拟（不覆盖温湿度）
-      updateSimEnvironment();
-      setInterval(updateSimEnvironment, 30000);
-      // 数字动画：进入时滚动到目标值
-      animateNumber(overviewArea, 11256);
-      animateNumber(overviewSoilCover, 11256);
-      animateNumber(overviewVegCover, 125);
-      animateNumber(donutTotal, 1221);
-      // 初始化地图
-      nextTick(() => { initMap(); });
-      startMineStatsTicker();
-    });
-
-    return {
-      currentLayer,
-      showMineDetail,
-      selectedMine,
-      currentDate,
-      currentTime,
-      temperature,
-      weatherIcon,
-      airQuality,
-      humidity,
-      soilMoisture,
-      rainfall,
-      airTemp,
-      overviewArea,
-      overviewSoilCover,
-      overviewVegCover,
-      donutTotal,
-      searchMineId,
-      ndviChart,
-      rankingList,
-      personnelData,
-      switchLayer,
-      searchMineById,
-      formatTrend,
-      getTrendClass,
-      getMkTrendClass,
-      formatSensSlope,
-      mineTotal,
-      monitorCount,
-      interventionCount,
-      goToGeoView
-    };
+  baseMaps = {
+    base: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }),
+    satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }),
+    terrain: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Terrain_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 })
   }
-};
 
+  baseMaps.base.addTo(map)
+  map.on('zoomend', onZoomEnd)
+  
+  // Try to load data
+  await loadMinesData()
+}
+
+const onZoomEnd = () => {
+    const z = map.getZoom()
+    if (mineLayer) {
+        const opacity = z < 10 ? 0.4 : 0.8
+        const fillOpacity = z < 10 ? 0.05 : 0.2
+        mineLayer.setStyle({ opacity, fillOpacity })
+    }
+}
+
+const switchLayer = (key) => {
+  if (currentLayer.value === key) return
+  map.removeLayer(baseMaps[currentLayer.value])
+  currentLayer.value = key
+  baseMaps[key].addTo(map)
+}
+
+const loadMinesData = async () => {
+    isLoading.value = true
+    globalError.value = ''
+    try {
+        const res = await axios.get(`${API_BASE}/api/geojson`)
+        if (mineLayer) map.removeLayer(mineLayer)
+        
+        mineLayer = L.geoJSON(res.data, {
+            style: { color: '#0ea5e9', weight: 1, opacity: 0.6, fillOpacity: 0.1 },
+            onEachFeature: (feature, layer) => {
+                layer.on('click', () => setSelectedMineFromFeature(feature))
+            }
+        }).addTo(map)
+        
+        if (res.data.features.length > 0) map.fitBounds(mineLayer.getBounds())
+        backend.connected = true
+    } catch (e) {
+        console.error("Failed to load mines", e)
+        globalError.value = '无法连接到数据服务，请检查后端状态'
+        backend.connected = false
+    } finally {
+        isLoading.value = false
+    }
+}
+
+const setSelectedMineFromFeature = async (feature) => {
+    const p = feature.properties
+    selectedMine.mine_id = p.FID_1
+    // 优先使用 name，否则尝试组合位置信息，最后兜底 ID
+    selectedMine.name = p.name || p.mine_name || (p.XIAN ? `${p.XIAN}矿山 ${p.FID_1}` : `矿山 ${p.FID_1}`)
+    // 优先使用 area，否则使用 dali.geojson 特有的 TBTYMJ (图斑投影面积)
+    selectedMine.area = p.area || p.TBTYMJ || '—'
+    
+    // Mock Data for visualization
+    selectedMine.ndvi_trend = (Math.random() * 0.1) - 0.05
+    metrics.endIndex = (Math.random() * 100 + 100).toFixed(0)
+    metrics.potentialScore = (Math.random() * 10).toFixed(1)
+    metrics.riskLevel = Math.random() > 0.7 ? 'High' : 'Low'
+    
+    mineDetail.open = true
+    await nextTick()
+    renderNdviChart()
+    // Re-render other charts to ensure they have data
+    renderPredictionChart()
+    renderHeatmapChart()
+}
+
+// Drag Handlers
+const onDragStart = (e, index) => {
+    draggedIndex = index
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.dropEffect = 'move'
+    e.target.style.opacity = '0.4'
+}
+
+const onDrop = async (e, dropIndex) => {
+    e.target.style.opacity = '1'
+    if (draggedIndex === -1 || draggedIndex === dropIndex) return
+    
+    const item = stackOrder.value[draggedIndex]
+    stackOrder.value.splice(draggedIndex, 1)
+    stackOrder.value.splice(dropIndex, 0, item)
+    draggedIndex = -1
+    
+    await nextTick()
+    renderPredictionChart()
+    renderHeatmapChart()
+}
+
+// Charts
+const renderPredictionChart = () => {
+    if (!predictionChartEl.value || !selectedMine.mine_id) return
+    if (!predictionChart) predictionChart = echarts.init(predictionChartEl.value)
+    predictionChart.setOption({
+        backgroundColor: 'transparent',
+        grid: { top: 10, bottom: 20, left: 30, right: 10 },
+        tooltip: { trigger: 'axis' },
+        xAxis: { type: 'category', data: ['2021', '2022', '2023', '2024', '2025'], axisLine: { lineStyle: { color: '#555' } } },
+        yAxis: { type: 'value', splitLine: { show: false }, axisLabel: { color: '#888' } },
+        series: [{ type: 'line', data: [120, 132, 101, 134, 90], smooth: true, itemStyle: { color: '#0ea5e9' }, areaStyle: { opacity: 0.1 } }]
+    })
+    predictionChart.resize()
+}
+
+const renderHeatmapChart = () => {
+    if (!heatmapChartEl.value || !selectedMine.mine_id) return
+    if (!heatmapChart) heatmapChart = echarts.init(heatmapChartEl.value)
+    heatmapChart.setOption({
+        backgroundColor: 'transparent',
+        grid: { top: 0, bottom: 0, left: 0, right: 0 },
+        series: [{ type: 'treemap', data: [{name: 'Zone A', value: 40}, {name: 'Zone B', value: 20}, {name: 'Zone C', value: 15}], itemStyle: { borderColor: '#111' }, label: { show: true } }]
+    })
+    heatmapChart.resize()
+}
+
+const renderNdviChart = () => {
+    if (!ndviChartEl.value) return
+    if (!ndviChart) ndviChart = echarts.init(ndviChartEl.value)
+    ndviChart.setOption({
+        backgroundColor: 'transparent',
+        grid: { top: 10, bottom: 20, left: 30, right: 10 },
+        xAxis: { type: 'category', data: ['2018', '2020', '2022', '2024'], axisLine: { lineStyle: { color: '#555' } } },
+        yAxis: { type: 'value', splitLine: { show: false } },
+        series: [{ type: 'bar', data: [0.4, 0.5, 0.45, 0.6], itemStyle: { color: '#10b981' } }]
+    })
+    ndviChart.resize()
+}
+
+// Actions
+const startModel = () => { 
+    model.state = 'running'
+    modelTimer = setInterval(() => { 
+        model.lastUpdatedAt = Date.now()
+        // Mock update
+        if (predictionChart) {
+            const opt = predictionChart.getOption()
+            if (opt && opt.series && opt.series[0]) {
+                const data = opt.series[0].data
+                data.shift()
+                data.push(Math.random() * 100 + 50)
+                predictionChart.setOption({ series: [{ data }] })
+            }
+        }
+    }, model.updateEverySec * 1000) 
+}
+const pauseModel = () => { model.state = 'paused'; clearInterval(modelTimer) }
+const confirmStopModel = () => { confirm.open = true; confirm.title='停止模型'; confirm.message='确定要停止当前预测模型吗？'; confirm.onConfirm = () => { pauseModel(); model.state='idle'; confirm.open=false } }
+const runConfirm = () => { if (confirm.onConfirm) confirm.onConfirm() }
+const searchMineById = () => { 
+    alert(`Searching for ${searchMineId.value}... (Ensure backend is connected)`)
+}
+
+onMounted(async () => {
+    updateDateTime()
+    setInterval(updateDateTime, 1000)
+    await nextTick()
+    await initMap()
+    // Initial resize to ensure charts fit
+    onResize()
+    window.addEventListener('resize', onResize)
+})
+
+let resizeTimer = null
+const onResize = () => {
+    if (resizeTimer) clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(() => {
+        predictionChart?.resize()
+        heatmapChart?.resize()
+        ndviChart?.resize()
+    }, 200)
+}
+
+onBeforeUnmount(() => {
+    window.removeEventListener('resize', onResize)
+    if (modelTimer) clearInterval(modelTimer)
+    if (map) {
+        map.remove()
+        map = null
+    }
+    if (resizeTimer) clearTimeout(resizeTimer)
+})
 </script>
 
-<style>
-/* 全局样式 */
-html, body, #app {
-  margin: 0;
-  padding: 0;
-  width: 100%;
-  height: 100%;
+<style scoped>
+/* Fullscreen Layout */
+.terminal-fullscreen {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
   overflow: hidden;
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #fff;
 }
 
-.dashboard {
+.map-background {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: #111;
+}
+
+/* Header Overlay */
+.topbar-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent);
+  z-index: 20;
+  pointer-events: none;
+}
+.topbar-overlay > * { pointer-events: auto; }
+
+.brand-title { font-size: 20px; font-weight: 700; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+.brand-subtitle { font-size: 10px; color: rgba(255,255,255,0.6); text-transform: uppercase; letter-spacing: 1px; }
+
+.topbar-status { display: flex; gap: 20px; align-items: center; font-size: 12px; color: rgba(255,255,255,0.8); }
+.status-item { display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.4); padding: 4px 10px; border-radius: 100px; backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.1); }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: #666; transition: all 0.3s; }
+.status-dot.active { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+.datetime { font-family: monospace; font-size: 14px; }
+
+/* Loading & Error */
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(5px);
+  z-index: 50;
   display: flex;
   flex-direction: column;
-  width: 100%;
-  height: 100vh;
-  background-color: #0a1929;
-  color: #fff;
-  font-family: 'Arial', sans-serif;
-  background-image: linear-gradient(to bottom, #001529, #0a1929);
-}
-
-/* 顶部标题栏（半透明玻璃风格） */
-.header {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  height: 60px;
-  padding: 0 20px;
-  background-color: rgba(10, 25, 41, 0.35);
-  border-bottom: 1px solid rgba(78, 205, 196, 0.25);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(8px);
+  justify-content: center;
+  gap: 15px;
 }
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255,255,255,0.3);
+  border-radius: 50%;
+  border-top-color: #0ea5e9;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { font-size: 14px; color: #ccc; letter-spacing: 1px; }
 
-.header-left, .header-right { display: flex; align-items: center; }
-.header-title h1 { margin: 0; font-size: 24px; font-weight: bold; color: #f0f0f0; text-shadow: 0 0 10px rgba(24, 144, 255, 0.5); letter-spacing: 2px; }
-.weather { display: flex; align-items: center; gap: 10px; }
-.weather-icon { font-size: 24px; }
-.temperature { font-size: 16px; font-weight: bold; color: #ff9800; }
-.air-quality { font-size: 14px; color: #4ecdc4; padding: 2px 6px; background-color: rgba(78, 205, 196, 0.2); border-radius: 4px; }
-.date-time { font-size: 14px; color: #bbb; margin-right: 20px; }
-.login-info { display: flex; align-items: center; gap: 5px; font-size: 14px; color: #bbb; padding: 5px 10px; background-color: rgba(255, 255, 255, 0.1); border-radius: 4px; }
-
-/* 主内容区 */
-.main-content { display: flex; flex: 1; width: 100%; height: calc(100vh - 60px); overflow: hidden; position: relative; }
-
-/* 地图容器 */
-#map { width: 100%; height: 100%; position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1; }
-
-/* 左侧面板 */
-.left-panel { width: 280px; padding: 15px; background-color: rgba(10, 25, 41, 0.25); border-right: 1px solid #1e3a5f; z-index: 10; backdrop-filter: blur(6px); overflow-y: auto; height: 100%; box-shadow: 5px 0 15px rgba(0, 0, 0, 0.2); }
-
-/* 地图控件 */
-.map-controls { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; background-color: rgba(10, 25, 41, 0.5); border: 1px solid #1e3a5f; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 10px; backdrop-filter: blur(8px); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25); }
-.layer-switch { display: flex; gap: 5px; }
-.layer-btn { padding: 5px 10px; font-size: 12px; cursor: pointer; border-radius: 3px; background-color: rgba(30, 58, 95, 0.5); transition: all 0.3s; }
-.layer-btn:hover { background-color: rgba(78, 205, 196, 0.3); }
-.layer-btn.active { background-color: #4ecdc4; color: #0a1929; }
-.search-container { display: flex; gap: 5px; margin-top: 5px; }
-.search-input { flex: 1; padding: 5px 10px; background-color: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 4px; outline: none; }
-.search-input::placeholder { color: rgba(255, 255, 255, 0.5); }
-.search-btn { padding: 5px 10px; background-color: #4ecdc4; color: #0a1929; border: none; border-radius: 4px; cursor: pointer; transition: all 0.3s; }
-.search-btn:hover { background-color: #3db9b0; }
-
-/* 右侧覆盖栅格 */
-.overlay-right { position: absolute; right: 20px; top: 70px; bottom: 20px; width: 48%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; z-index: 10; pointer-events: none; }
-.overlay-right > * { pointer-events: auto; }
-.data-overview { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-
-/* 玻璃卡片 */
-.glass-card { background-color: rgba(10, 25, 41, 0.45); backdrop-filter: blur(8px); border: 1px solid rgba(78, 205, 196, 0.25); border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); padding: 10px; margin-bottom: 12px; }
-
-/* 浮动卡片 */
-.floating-card {
+.error-toast {
   position: absolute;
-  z-index: 1000;
-  width: 300px;
-}
-
-.data-overview {
-   top: 80px;
-   right: 24px;
- }
- 
- .env-indicators {
-   top: 360px;
-   right: 24px;
- }
-
-/* 居中弹窗 */
-.centered-popup {
-  position: fixed !important;
-  top: 50% !important;
-  left: 50% !important;
-  transform: translate(-50%, -50%) !important;
-}
-
-/* 详情弹窗 */
-.mine-detail-popup { position: absolute; bottom: 20px; right: 20px; width: 500px; max-width: 60vw; max-height: 70vh; overflow-y: auto; background-color: rgba(10, 25, 41, 0.9); border: 1px solid #1e3a5f; border-radius: 12px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); z-index: 1000; backdrop-filter: blur(8px); }
-/* 隐藏弹窗滚动条，仅保留滚动行为 */
-.mine-detail-popup::-webkit-scrollbar { width: 0; height: 0; }
-.mine-detail-popup { scrollbar-width: none; -ms-overflow-style: none; }
-.popup-header { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background-color: rgba(30, 58, 95, 0.5); border-bottom: 1px solid #1e3a5f; position: sticky; top: 0; z-index: 2; }
-.popup-title { font-size: 16px; font-weight: bold; color: #4ecdc4; }
-.popup-close { cursor: pointer; font-size: 18px; color: #bbb; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 50%; transition: all 0.3s; }
-.popup-close:hover { color: #ff6b6b; background-color: rgba(255, 255, 255, 0.1); }
-.popup-content { padding: 20px; }
-.detail-item { display: flex; justify-content: space-between; margin-bottom: 12px; align-items: center; }
-.detail-label { font-size: 14px; color: #bbb; }
-.detail-value { font-size: 14px; font-weight: bold; padding: 4px 8px; border-radius: 4px; background-color: rgba(255, 255, 255, 0.05); }
-.trend-up { color: #4ecdc4; background-color: rgba(78, 205, 196, 0.1); }
-.trend-down { color: #ff6b6b; background-color: rgba(255, 107, 107, 0.1); }
-.trend-chart { margin-top: 20px; height: 220px; background-color: rgba(30, 58, 95, 0.3); border: 1px solid #1e3a5f; border-radius: 8px; overflow: hidden; padding: 10px; }
-.chart-placeholder { width: 100%; height: 100%; }
-
-/* 响应式调整 */
-@media (max-width: 1200px) { .left-panel { width: 240px; } }
-@media (max-width: 992px) { .left-panel { width: 200px; } }
-
-/* 悬浮卡片定位：左侧不贴边 */
-.mine-type-card {
-  left: 24px;
   top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(239, 68, 68, 0.9);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  backdrop-filter: blur(4px);
 }
-.ranking-card {
-  left: 24px;
-  top: 360px;
+.close-toast { background: none; border: none; color: #fff; font-size: 18px; cursor: pointer; opacity: 0.8; }
+
+/* Right Floating Stack */
+.floating-stack {
+  position: absolute;
+  top: 70px;
+  right: 15px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  z-index: 10;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  padding-bottom: 20px;
+  scrollbar-width: none;
+}
+.floating-stack::-webkit-scrollbar { display: none; }
+
+/* Glass Card */
+.glass-card {
+  width: 100%;
+  background: rgba(18, 24, 38, 0.80);
+  backdrop-filter: blur(12px);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.08);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 
-/* 强化标题与数字样式 */
-.fancy-title {
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: #e0f7ff;
-  border-bottom: 1px dashed rgba(78,205,196,0.35);
-  padding-bottom: 6px;
-  margin-bottom: 8px;
-}
-.gradient-number {
-  font-size: 26px;
-  font-weight: 800;
-  background: linear-gradient(135deg, #4ecdc4 0%, #24c1ff 60%, #fefefe 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  text-shadow: 0 0 12px rgba(36, 193, 255, 0.35);
-}
-.subtle-label {
-  font-size: 12px;
-  color: rgba(255,255,255,0.75);
-}
+.glass-card:hover { border-color: rgba(255,255,255,0.15); box-shadow: 0 8px 30px rgba(0,0,0,0.3); transform: translateY(-2px); }
+.glass-card:active { transform: scale(0.99); }
+.glass-card[draggable="true"] { cursor: grab; }
+.glass-card[draggable="true"]:active { cursor: grabbing; }
 
-/* 排名卡片样式 */
-.ranking-list { display: flex; flex-direction: column; gap: 8px; }
-.ranking-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 8px; background: rgba(30,58,95,0.35); border: 1px solid rgba(78,205,196,0.18); }
-.rank-pill { font-size: 12px; color: #0a1929; background: linear-gradient(135deg, #4ecdc4, #24c1ff); padding: 4px 8px; border-radius: 999px; box-shadow: 0 2px 8px rgba(36,193,255,0.3); }
-.rank-name { font-weight: 600; color: #f0f6ff; }
+.card-header { padding: 14px 18px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.02); }
+.card-title { font-size: 13px; font-weight: 600; color: #e2e8f0; letter-spacing: 0.5px; }
+.card-body { padding: 18px; }
+
+/* Components */
+.layer-switch { display: flex; background: rgba(0,0,0,0.3); border-radius: 8px; padding: 3px; margin-bottom: 14px; }
+.layer-btn { flex: 1; background: transparent; border: none; color: #94a3b8; padding: 6px; font-size: 12px; cursor: pointer; border-radius: 6px; transition: all 0.2s; }
+.layer-btn.active { background: rgba(255,255,255,0.15); color: #fff; font-weight: 600; shadow: 0 2px 4px rgba(0,0,0,0.1); }
+
+.search-box { display: flex; gap: 8px; }
+.search-box input { flex: 1; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: #fff; padding: 8px 12px; font-size: 12px; transition: border-color 0.2s; }
+.search-box input:focus { outline: none; border-color: #0ea5e9; }
+.icon-btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; cursor: pointer; color: #fff; width: 34px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+.icon-btn:hover { background: rgba(255,255,255,0.1); }
+
+.compact-form { display: flex; flex-direction: column; gap: 14px; }
+.form-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: #cbd5e1; }
+.form-row select, .form-row input[type="range"] { width: 60%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: #fff; padding: 4px; border-radius: 4px; }
+.action-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 10px; }
+.btn { border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer; transition: 0.2s; color: #fff; text-align: center; }
+.btn.primary { background: linear-gradient(135deg, #0ea5e9, #0284c7); box-shadow: 0 2px 8px rgba(14, 165, 233, 0.3); }
+.btn.primary:hover { filter: brightness(1.1); }
+.btn.warning { background: linear-gradient(135deg, #f59e0b, #d97706); }
+.btn.danger { background: linear-gradient(135deg, #ef4444, #dc2626); }
+.btn.ghost { background: transparent; border: 1px solid rgba(255,255,255,0.2); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; filter: grayscale(1); }
+
+.metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.metric-item { background: rgba(0,0,0,0.3); padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.03); }
+.m-label { font-size: 10px; color: #94a3b8; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.m-val { font-size: 18px; font-weight: 700; font-family: 'JetBrains Mono', monospace; color: #f1f5f9; }
+.m-val.blue { color: #38bdf8; text-shadow: 0 0 10px rgba(56, 189, 248, 0.3); }
+.m-val.orange { color: #fb923c; text-shadow: 0 0 10px rgba(251, 146, 60, 0.3); }
+.m-val.good { color: #34d399; }
+.m-val.bad { color: #f87171; }
+
+.chart-box { height: 140px; width: 100%; }
+.chart-box-sm { height: 160px; width: 100%; }
+.empty-state { height: 140px; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.3); font-size: 12px; background: rgba(0,0,0,0.2); border-radius: 6px; border: 1px dashed rgba(255,255,255,0.1); }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); z-index: 100; display: flex; align-items: center; justify-content: center; animation: fade-in 0.2s ease; }
+.modal-card { width: 420px; max-width: 90vw; background: #1e293b; border: 1px solid rgba(255,255,255,0.1); }
+.modal-card.wide { width: 640px; }
+.split-body { display: grid; grid-template-columns: 1fr 1.5fr; gap: 24px; }
+.kv-row { display: flex; justify-content: space-between; font-size: 13px; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.mono { font-family: 'JetBrains Mono', monospace; color: #e2e8f0; }
+.close-btn { background: none; border: none; color: #fff; font-size: 20px; cursor: pointer; opacity: 0.6; transition: opacity 0.2s; }
+.close-btn:hover { opacity: 1; }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* Responsive Design */
+@media (max-width: 980px) {
+  .topbar-status { display: none; }
+  .floating-stack {
+    top: auto;
+    bottom: 0;
+    right: 0;
+    left: 0;
+    width: 100%;
+    max-height: 45vh;
+    padding: 15px;
+    background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0.4));
+    backdrop-filter: blur(5px);
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    align-items: flex-end;
+    gap: 15px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+  .draggable-wrapper {
+    height: 100%;
+    flex-shrink: 0;
+  }
+  .glass-card {
+    width: 300px;
+    height: 100%;
+    max-height: 100%;
+    overflow-y: auto;
+  }
+  .modal-card.wide { grid-template-columns: 1fr; width: 90vw; }
+  .split-body { grid-template-columns: 1fr; }
+}
 </style>
-
-
-
-
-
-// 矿山类型统计数字（滚动轮播）
-const mineTotal = ref(3821);
-const monitorCount = ref(1237);
-const interventionCount = ref(2584);
-const startMineStatsTicker = () => {
-  const targets = [
-    { ref: mineTotal, value: 3821 },
-    { ref: monitorCount, value: 1237 },
-    { ref: interventionCount, value: 2584 },
-  ];
-  let idx = 0;
-  setInterval(() => {
-    const t = targets[idx];
-    t.ref.value = 0;
-    animateNumber(t.ref, t.value, 900);
-    idx = (idx + 1) % targets.length;
-  }, 3500);
-};
-}
-.enter-system-btn { padding: 6px 12px; background-color: #4ecdc4; color: #0a1929; border: none; border-radius: 4px; cursor: pointer; }
-.enter-system-btn:hover { background-color: #3db9b0; }

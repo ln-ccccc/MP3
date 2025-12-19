@@ -19,19 +19,37 @@ const dbConfig = {
   host: process.env.DB_HOST || process.env.MYSQL_HOST || 'localhost',
   user: process.env.DB_USER || process.env.MYSQL_USER || 'root',
   password: process.env.DB_PASSWORD ?? process.env.MYSQL_PASSWORD ?? '',
-  database: process.env.DB_NAME || process.env.MYSQL_DB || process.env.MYSQL_DATABASE || 'mine_db',
   port: process.env.DB_PORT ? Number(process.env.DB_PORT) : (process.env.MYSQL_PORT ? Number(process.env.MYSQL_PORT) : 3306),
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
 };
+const dbName = process.env.DB_NAME || process.env.MYSQL_DB || process.env.MYSQL_DATABASE || 'mine_db';
 
-// 创建数据库连接池
-console.log('MySQL 配置:', { host: dbConfig.host, user: dbConfig.user, database: dbConfig.database, port: dbConfig.port });
-const pool = mysql.createPool(dbConfig);
+let pool;
 
-// 初始化数据库：创建表并导入GeoJSON
+// 初始化数据库：创建库、表并导入GeoJSON
 async function initDatabase() {
+  // 1. 先连接到 MySQL Server (不指定数据库) 创建数据库
+  const tempConnection = await mysql.createConnection({
+    host: dbConfig.host,
+    user: dbConfig.user,
+    password: dbConfig.password,
+    port: dbConfig.port
+  });
+  
+  try {
+    await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
+    console.log(`数据库 ${dbName} 检查/创建完成`);
+  } finally {
+    await tempConnection.end();
+  }
+
+  // 2. 创建连接池 (连接到具体数据库)
+  pool = mysql.createPool({ ...dbConfig, database: dbName });
+  console.log('MySQL 连接池已创建:', { host: dbConfig.host, user: dbConfig.user, database: dbName });
+
+  // 3. 创建表
   const createTableSQL = `
     CREATE TABLE IF NOT EXISTS mines_geojson (
       fid_1 INT PRIMARY KEY,
@@ -41,10 +59,20 @@ async function initDatabase() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `;
-
   await pool.query(createTableSQL);
+  
+  // 4. 创建NDVI数据表 (如果不存在) - 简单结构示例
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ndvi_data (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      fid INT NOT NULL,
+      year INT NOT NULL,
+      ndvi_value FLOAT,
+      INDEX idx_fid (fid)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
 
-  // 如果表为空则尝试导入本地GeoJSON
+  // 5. 如果表为空则尝试导入本地GeoJSON
   const [rows] = await pool.query('SELECT COUNT(*) AS count FROM mines_geojson');
   if (rows[0].count === 0) {
     const filePath = path.resolve(process.cwd(), process.env.GEOJSON_PATH || 'dali.geojson');
@@ -52,16 +80,23 @@ async function initDatabase() {
       const raw = fs.readFileSync(filePath, 'utf-8');
       const collection = JSON.parse(raw);
       if (collection && collection.features && Array.isArray(collection.features)) {
+        let successCount = 0;
         for (const feat of collection.features) {
           const fid = feat.properties?.FID_1;
           const name = feat.properties?.mine_name || feat.properties?.name || `FID_${fid}`;
           if (!fid) continue; // 必须有FID_1
-          await pool.query(
-            'INSERT INTO mines_geojson (fid_1, mine_name, geometry, properties) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE mine_name = VALUES(mine_name), geometry = VALUES(geometry), properties = VALUES(properties)',
-            [fid, name, JSON.stringify(feat.geometry), JSON.stringify(feat.properties || {})]
-          );
+          
+          try {
+             await pool.query(
+              'INSERT INTO mines_geojson (fid_1, mine_name, geometry, properties) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE mine_name = VALUES(mine_name), geometry = VALUES(geometry), properties = VALUES(properties)',
+              [fid, name, JSON.stringify(feat.geometry), JSON.stringify(feat.properties || {})]
+            );
+            successCount++;
+          } catch (err) {
+            console.error(`导入 FID ${fid} 失败:`, err.message);
+          }
         }
-        console.log(`导入GeoJSON完成，共 ${collection.features.length} 条。`);
+        console.log(`导入GeoJSON完成，成功 ${successCount}/${collection.features.length} 条。`);
       }
     } else {
       console.warn('未找到GeoJSON文件，跳过导入：', filePath);
@@ -72,12 +107,11 @@ async function initDatabase() {
 // 测试并初始化
 (async () => {
   try {
-    const connection = await pool.getConnection();
-    console.log('数据库连接成功');
-    connection.release();
     await initDatabase();
+    console.log('数据库初始化全部完成');
   } catch (error) {
     console.error('数据库初始化失败:', error);
+    process.exit(1);
   }
 })();
 
